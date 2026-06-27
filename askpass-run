@@ -40,7 +40,16 @@ done
 [ "$have_reason" -eq 1 ] || { usage; exit 2; }
 [ "$#" -gt 0 ] || { usage; exit 2; }
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+self=$0
+case $self in
+  */*) ;;
+  *) self=$(command -v "$self") || {
+    printf '%s\n' "askpass-run: unable to resolve wrapper path: $0" >&2
+    exit 1
+  } ;;
+esac
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd)
 askpass=$script_dir/askpass
 
 [ -x "$askpass" ] || {
