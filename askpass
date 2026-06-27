@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ def read_cmdline(pid: int) -> str:
         return ""
 
     parts = [part.decode(errors="replace") for part in raw.split(b"\0") if part]
-    return " ".join(parts)
+    return " ".join(shlex.quote(part) for part in parts)
 
 
 def read_comm(pid: int) -> str:
@@ -295,11 +296,15 @@ def run_kdialog(prompt: str, command: str, reason: str, callers: list[ProcessInf
 def run_tty(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
     import getpass
 
+    if not have_controlling_tty():
+        print(f"{APP_TITLE}: no controlling terminal available", file=sys.stderr)
+        return 1
+
     print(APP_TITLE, file=sys.stderr)
-    print(f"Prompt: {prompt}", file=sys.stderr)
-    print(f"Command: {command}", file=sys.stderr)
+    print(f"Prompt: {_tty_safe(prompt)}", file=sys.stderr)
+    print(f"Command: {_tty_safe(command)}", file=sys.stderr)
     if reason:
-        print(f"Reason: {reason}", file=sys.stderr)
+        print(f"Reason: {_tty_safe(reason)}", file=sys.stderr)
 
     try:
         secret = getpass.getpass("Password: ")
@@ -308,6 +313,25 @@ def run_tty(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) 
 
     emit_secret(secret)
     return 0
+
+
+def _tty_safe(text: str) -> str:
+    parts = []
+    for char in text:
+        codepoint = ord(char)
+        if codepoint < 32 or codepoint == 127 or 0x80 <= codepoint <= 0x9f:
+            parts.append(f"\\x{codepoint:02x}" if codepoint <= 0xff else f"\\u{codepoint:04x}")
+        else:
+            parts.append(char)
+    return "".join(parts)
+
+
+def have_controlling_tty() -> bool:
+    try:
+        with open("/dev/tty", "rb"):
+            return True
+    except OSError:
+        return False
 
 
 def have_display() -> bool:

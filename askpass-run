@@ -48,11 +48,8 @@ askpass=$script_dir/askpass
   exit 1
 }
 
-command_text=
-for arg in "$@"; do
-  quoted=$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")
-  command_text="${command_text}${command_text:+ }'$quoted'"
-done
+command_text=${1##*/}
+[ "$#" -gt 1 ] && command_text="$command_text ..."
 
 export ASKPASS_COMMAND=$command_text
 export ASKPASS_REASON=$reason
