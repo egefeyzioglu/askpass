@@ -5,13 +5,17 @@ returns the secret to the caller.
 
 ## Features
 
-- Shows the command being invoked.
-- Shows the process chain that called the helper.
+- Modern GTK 4 / libadwaita dialog that leads with what matters: the command
+  being invoked, an optional reason, and the password field.
+- The calling process chain is tucked into a collapsible "Process details"
+  section so the default view stays uncluttered while the audit trail remains
+  one click away.
 - Lets agents explain why they are invoking the command with `ASKPASS_REASON`
   or the `askpass-run --why` wrapper.
-- Uses a native GUI dialog through `zenity` or `kdialog`, with a terminal
-  fallback for headless/manual testing.
-- Keeps the implementation compact and dependency-light.
+- Falls back gracefully: GTK first, then `zenity`, then `kdialog`, and finally
+  a terminal prompt for headless/manual testing.
+- Keeps the implementation compact and dependency-light (Python standard
+  library, plus PyGObject when a GUI is available).
 
 ## Usage
 
@@ -56,5 +60,6 @@ wrapper unless already provided.
 
 The secret only travels from the GUI program to stdout, which is the askpass
 contract. Context is shown in the dialog and written only to stderr by the
-terminal fallback. The helper reads process metadata from `/proc` and uses only
-Python standard library modules.
+terminal fallback. The helper reads process metadata from `/proc`. It relies on
+the Python standard library, plus PyGObject (GTK 4 / libadwaita) for the GUI
+dialog when a display is available.

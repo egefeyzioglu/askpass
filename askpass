@@ -15,7 +15,8 @@ import sys
 from dataclasses import dataclass
 
 
-APP_TITLE = "Command approval"
+APP_TITLE = "Authentication Required"
+APP_ID = "org.physsec.askpass"
 ENV_COMMAND = "ASKPASS_COMMAND"
 ENV_REASON = "ASKPASS_REASON"
 
@@ -70,7 +71,7 @@ def parent_processes(limit: int = 3) -> list[ProcessInfo]:
 
 
 def prompt_text() -> str:
-    return " ".join(sys.argv[1:]).strip() or "Enter password:"
+    return " ".join(sys.argv[1:]).strip() or "Enter your password to continue"
 
 
 def command_text(callers: list[ProcessInfo]) -> str:
@@ -83,25 +84,174 @@ def command_text(callers: list[ProcessInfo]) -> str:
 
 
 def reason_text() -> str:
-    return os.environ.get(ENV_REASON, "").strip() or "No reason was provided."
+    """Return the caller-supplied reason, or an empty string if none was given."""
+    return os.environ.get(ENV_REASON, "").strip()
 
 
-def zenity_text(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> str:
-    caller_lines = "\n".join(
-        f"PID {caller.pid}: {caller.command}" for caller in callers
-    ) or "unknown"
+def emit_secret(secret: str) -> None:
+    sys.stdout.write(secret)
+    sys.stdout.write("\n")
 
-    body = (
-        f"<b>{html.escape(prompt)}</b>\n\n"
-        f"<b>Command</b>\n{html.escape(command)}\n\n"
-        f"<b>Reason</b>\n{html.escape(reason)}\n\n"
-        f"<b>Called by</b>\n{html.escape(caller_lines)}"
-    )
-    return body
+
+# --------------------------------------------------------------------------- #
+# GTK 4 / libadwaita dialog (primary path)
+# --------------------------------------------------------------------------- #
+
+def run_gtk(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
+    import gi
+
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, Gio, Gtk
+
+    state = {"secret": None}
+
+    app = Adw.Application(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
+
+    def on_activate(application: Adw.Application) -> None:
+        window = Adw.ApplicationWindow(application=application)
+        window.set_title(APP_TITLE)
+        window.set_default_size(420, -1)
+        window.set_resizable(False)
+
+        def deny() -> None:
+            window.close()
+
+        def allow() -> None:
+            state["secret"] = password_row.get_text()
+            window.close()
+
+        # Escape denies.
+        key = Gtk.EventControllerKey()
+
+        def on_key(_ctrl, keyval, _code, _mods) -> bool:
+            from gi.repository import Gdk
+
+            if keyval == Gdk.KEY_Escape:
+                deny()
+                return True
+            return False
+
+        key.connect("key-pressed", on_key)
+        window.add_controller(key)
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        header.add_css_class("flat")
+        header.set_show_title(False)
+        toolbar.add_top_bar(header)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        content.set_margin_top(8)
+        content.set_margin_bottom(24)
+        content.set_margin_start(24)
+        content.set_margin_end(24)
+
+        icon = Gtk.Image.new_from_icon_name("dialog-password-symbolic")
+        icon.set_pixel_size(56)
+        icon.add_css_class("accent")
+        content.append(icon)
+
+        title = Gtk.Label(label=prompt)
+        title.add_css_class("title-2")
+        title.set_wrap(True)
+        title.set_justify(Gtk.Justification.CENTER)
+        content.append(title)
+
+        if reason:
+            subtitle = Gtk.Label(label=reason)
+            subtitle.add_css_class("dim-label")
+            subtitle.set_wrap(True)
+            subtitle.set_justify(Gtk.Justification.CENTER)
+            content.append(subtitle)
+
+        # Command, shown as a monospace card so it stands out and is selectable.
+        command_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        command_card.add_css_class("card")
+        command_label = Gtk.Label(label=command)
+        command_label.add_css_class("monospace")
+        command_label.set_wrap(True)
+        command_label.set_wrap_mode(2)  # WORD_CHAR
+        command_label.set_selectable(True)
+        command_label.set_xalign(0.0)
+        command_label.set_margin_top(12)
+        command_label.set_margin_bottom(12)
+        command_label.set_margin_start(14)
+        command_label.set_margin_end(14)
+        command_card.append(command_label)
+        content.append(command_card)
+
+        # Password entry.
+        entry_group = Adw.PreferencesGroup()
+        password_row = Adw.PasswordEntryRow(title="Password")
+        password_row.connect("entry-activated", lambda _row: allow())
+        entry_group.add(password_row)
+        content.append(entry_group)
+
+        # Process chain, collapsed by default — auditing detail, not everyday noise.
+        if callers:
+            detail_group = Adw.PreferencesGroup()
+            expander = Adw.ExpanderRow(title="Process details")
+            expander.set_subtitle(f"{len(callers)} calling process"
+                                  + ("es" if len(callers) != 1 else ""))
+            for caller in callers:
+                row = Adw.ActionRow()
+                row.set_use_markup(False)  # command text is literal, not Pango markup
+                row.set_title(caller.command)
+                row.set_subtitle(f"PID {caller.pid}")
+                row.set_title_lines(1)
+                row.add_css_class("monospace")
+                expander.add_row(row)
+            detail_group.add(expander)
+            content.append(detail_group)
+
+        # Action buttons.
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        buttons.set_homogeneous(True)
+        buttons.set_margin_top(6)
+
+        deny_button = Gtk.Button(label="Deny")
+        deny_button.connect("clicked", lambda _btn: deny())
+        buttons.append(deny_button)
+
+        allow_button = Gtk.Button(label="Allow")
+        allow_button.add_css_class("suggested-action")
+        allow_button.connect("clicked", lambda _btn: allow())
+        buttons.append(allow_button)
+
+        content.append(buttons)
+
+        toolbar.set_content(content)
+        window.set_content(toolbar)
+        window.present()
+        password_row.grab_focus()
+
+    app.connect("activate", on_activate)
+    app.run([])
+
+    if state["secret"] is None:
+        return 1
+    emit_secret(state["secret"])
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Fallback dialogs
+# --------------------------------------------------------------------------- #
+
+def _plain_context(command: str, reason: str) -> str:
+    sections = [f"Command:\n{command}"]
+    if reason:
+        sections.append(f"Reason:\n{reason}")
+    return "\n\n".join(sections)
 
 
 def run_zenity(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
-    text = zenity_text(prompt, command, reason, callers)
+    body = [f"<b>{html.escape(prompt)}</b>", html.escape(command)]
+    if reason:
+        body.append(html.escape(reason))
+    text = "\n\n".join(body)
+
     cmd = [
         "zenity",
         "--forms",
@@ -117,31 +267,18 @@ def run_zenity(prompt: str, command: str, reason: str, callers: list[ProcessInfo
         "Allow",
         "--cancel-label",
         "Deny",
-        "--width",
-        "560",
-        "--height",
-        "420",
     ]
 
     completed = subprocess.run(cmd, text=True, stdout=subprocess.PIPE)
     if completed.returncode != 0:
         return completed.returncode
 
-    sys.stdout.write(completed.stdout.rstrip("\n"))
-    sys.stdout.write("\n")
+    emit_secret(completed.stdout.rstrip("\n"))
     return 0
 
 
 def run_kdialog(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
-    caller_lines = "\n".join(
-        f"PID {caller.pid}: {caller.command}" for caller in callers
-    ) or "unknown"
-    message = (
-        f"{prompt}\n\n"
-        f"Command:\n{command}\n\n"
-        f"Reason:\n{reason}\n\n"
-        f"Called by:\n{caller_lines}"
-    )
+    message = f"{prompt}\n\n{_plain_context(command, reason)}"
 
     completed = subprocess.run(
         ["kdialog", "--title", APP_TITLE, "--password", message],
@@ -151,32 +288,30 @@ def run_kdialog(prompt: str, command: str, reason: str, callers: list[ProcessInf
     if completed.returncode != 0:
         return completed.returncode
 
-    sys.stdout.write(completed.stdout.rstrip("\n"))
-    sys.stdout.write("\n")
+    emit_secret(completed.stdout.rstrip("\n"))
     return 0
 
 
 def run_tty(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
     import getpass
 
-    caller_lines = "\n".join(
-        f"  PID {caller.pid}: {caller.command}" for caller in callers
-    ) or "  unknown"
-    print(f"{APP_TITLE}", file=sys.stderr)
+    print(APP_TITLE, file=sys.stderr)
     print(f"Prompt: {prompt}", file=sys.stderr)
     print(f"Command: {command}", file=sys.stderr)
-    print(f"Reason: {reason}", file=sys.stderr)
-    print("Called by:", file=sys.stderr)
-    print(caller_lines, file=sys.stderr)
+    if reason:
+        print(f"Reason: {reason}", file=sys.stderr)
 
     try:
         secret = getpass.getpass("Password: ")
     except (EOFError, KeyboardInterrupt):
         return 1
 
-    sys.stdout.write(secret)
-    sys.stdout.write("\n")
+    emit_secret(secret)
     return 0
+
+
+def have_display() -> bool:
+    return bool(os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"))
 
 
 def main() -> int:
@@ -188,11 +323,19 @@ def main() -> int:
     if os.environ.get("ASKPASS_TERMINAL") == "1":
         return run_tty(prompt, command, reason, callers)
 
-    if shutil.which("zenity"):
-        return run_zenity(prompt, command, reason, callers)
+    if have_display():
+        try:
+            import gi  # noqa: F401
 
-    if shutil.which("kdialog"):
-        return run_kdialog(prompt, command, reason, callers)
+            return run_gtk(prompt, command, reason, callers)
+        except Exception:
+            pass
+
+        if shutil.which("zenity"):
+            return run_zenity(prompt, command, reason, callers)
+
+        if shutil.which("kdialog"):
+            return run_kdialog(prompt, command, reason, callers)
 
     return run_tty(prompt, command, reason, callers)
 
