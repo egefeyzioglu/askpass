@@ -40,8 +40,8 @@ def read_cmdline(pid: int) -> str:
 
 def read_comm(pid: int) -> str:
     try:
-        with open(f"/proc/{pid}/comm", encoding="utf-8") as proc_file:
-            return proc_file.read().strip()
+        with open(f"/proc/{pid}/comm", "rb") as proc_file:
+            return proc_file.read().rstrip(b"\n").decode(errors="replace")
     except OSError:
         return ""
 
@@ -61,9 +61,9 @@ def parent_processes(limit: int = 3) -> list[ProcessInfo]:
         processes.append(process_info(pid))
 
         try:
-            with open(f"/proc/{pid}/stat", encoding="utf-8") as proc_file:
+            with open(f"/proc/{pid}/stat", "rb") as proc_file:
                 stat = proc_file.read()
-            pid = int(stat.rsplit(")", 1)[1].split()[1])
+            pid = int(stat.rsplit(b")", 1)[1].split()[1])
         except (OSError, IndexError, ValueError):
             break
 

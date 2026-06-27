@@ -11,12 +11,15 @@ EOF
 }
 
 reason=
+have_reason=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --why)
       [ "$#" -ge 2 ] || { usage; exit 2; }
       reason=$2
+      [ -n "$reason" ] || { usage; exit 2; }
+      have_reason=1
       shift 2
       ;;
     --)
@@ -34,10 +37,16 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ "$have_reason" -eq 1 ] || { usage; exit 2; }
 [ "$#" -gt 0 ] || { usage; exit 2; }
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 askpass=$script_dir/askpass
+
+[ -x "$askpass" ] || {
+  printf '%s\n' "askpass-run: helper not found or not executable: $askpass" >&2
+  exit 1
+}
 
 command_text=
 for arg in "$@"; do
