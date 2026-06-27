@@ -1,0 +1,55 @@
+#!/usr/bin/env sh
+set -eu
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: askpass-run --why REASON -- COMMAND [ARG...]
+
+Runs COMMAND with ASKPASS_COMMAND and ASKPASS_REASON set, and configures common
+askpass environment variables to point at ./askpass.
+EOF
+}
+
+reason=
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --why)
+      [ "$#" -ge 2 ] || { usage; exit 2; }
+      reason=$2
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[ "$#" -gt 0 ] || { usage; exit 2; }
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+askpass=$script_dir/askpass
+
+command_text=
+for arg in "$@"; do
+  quoted=$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")
+  command_text="${command_text}${command_text:+ }'$quoted'"
+done
+
+export ASKPASS_COMMAND=$command_text
+export ASKPASS_REASON=$reason
+export SSH_ASKPASS=$askpass
+export SSH_ASKPASS_REQUIRE=${SSH_ASKPASS_REQUIRE:-prefer}
+export GIT_ASKPASS=$askpass
+export SUDO_ASKPASS=$askpass
+
+exec "$@"

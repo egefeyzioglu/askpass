@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Small GUI askpass helper.
+
+The secret is written to stdout, as required by SSH_ASKPASS/GIT_ASKPASS/SUDO_ASKPASS.
+All context is shown in the dialog and never written next to the secret.
+"""
+
+from __future__ import annotations
+
+import html
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+
+
+APP_TITLE = "Command approval"
+ENV_COMMAND = "ASKPASS_COMMAND"
+ENV_REASON = "ASKPASS_REASON"
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    pid: int
+    command: str
+
+
+def read_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as proc_file:
+            raw = proc_file.read()
+    except OSError:
+        return ""
+
+    parts = [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+    return " ".join(parts)
+
+
+def read_comm(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/comm", encoding="utf-8") as proc_file:
+            return proc_file.read().strip()
+    except OSError:
+        return ""
+
+
+def process_info(pid: int) -> ProcessInfo:
+    return ProcessInfo(pid=pid, command=read_cmdline(pid) or read_comm(pid) or "unknown")
+
+
+def parent_processes(limit: int = 3) -> list[ProcessInfo]:
+    processes: list[ProcessInfo] = []
+    pid = os.getppid()
+
+    for _ in range(limit):
+        if pid <= 1:
+            break
+
+        processes.append(process_info(pid))
+
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as proc_file:
+                stat = proc_file.read()
+            pid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            break
+
+    return processes
+
+
+def prompt_text() -> str:
+    return " ".join(sys.argv[1:]).strip() or "Enter password:"
+
+
+def command_text(callers: list[ProcessInfo]) -> str:
+    explicit = os.environ.get(ENV_COMMAND, "").strip()
+    if explicit:
+        return explicit
+    if callers:
+        return callers[0].command
+    return "unknown"
+
+
+def reason_text() -> str:
+    return os.environ.get(ENV_REASON, "").strip() or "No reason was provided."
+
+
+def zenity_text(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> str:
+    caller_lines = "\n".join(
+        f"PID {caller.pid}: {caller.command}" for caller in callers
+    ) or "unknown"
+
+    body = (
+        f"<b>{html.escape(prompt)}</b>\n\n"
+        f"<b>Command</b>\n{html.escape(command)}\n\n"
+        f"<b>Reason</b>\n{html.escape(reason)}\n\n"
+        f"<b>Called by</b>\n{html.escape(caller_lines)}"
+    )
+    return body
+
+
+def run_zenity(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
+    text = zenity_text(prompt, command, reason, callers)
+    cmd = [
+        "zenity",
+        "--forms",
+        "--title",
+        APP_TITLE,
+        "--text",
+        text,
+        "--add-password",
+        "Password",
+        "--separator",
+        "",
+        "--ok-label",
+        "Allow",
+        "--cancel-label",
+        "Deny",
+        "--width",
+        "560",
+        "--height",
+        "420",
+    ]
+
+    completed = subprocess.run(cmd, text=True, stdout=subprocess.PIPE)
+    if completed.returncode != 0:
+        return completed.returncode
+
+    sys.stdout.write(completed.stdout.rstrip("\n"))
+    sys.stdout.write("\n")
+    return 0
+
+
+def run_kdialog(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
+    caller_lines = "\n".join(
+        f"PID {caller.pid}: {caller.command}" for caller in callers
+    ) or "unknown"
+    message = (
+        f"{prompt}\n\n"
+        f"Command:\n{command}\n\n"
+        f"Reason:\n{reason}\n\n"
+        f"Called by:\n{caller_lines}"
+    )
+
+    completed = subprocess.run(
+        ["kdialog", "--title", APP_TITLE, "--password", message],
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        return completed.returncode
+
+    sys.stdout.write(completed.stdout.rstrip("\n"))
+    sys.stdout.write("\n")
+    return 0
+
+
+def run_tty(prompt: str, command: str, reason: str, callers: list[ProcessInfo]) -> int:
+    import getpass
+
+    caller_lines = "\n".join(
+        f"  PID {caller.pid}: {caller.command}" for caller in callers
+    ) or "  unknown"
+    print(f"{APP_TITLE}", file=sys.stderr)
+    print(f"Prompt: {prompt}", file=sys.stderr)
+    print(f"Command: {command}", file=sys.stderr)
+    print(f"Reason: {reason}", file=sys.stderr)
+    print("Called by:", file=sys.stderr)
+    print(caller_lines, file=sys.stderr)
+
+    try:
+        secret = getpass.getpass("Password: ")
+    except (EOFError, KeyboardInterrupt):
+        return 1
+
+    sys.stdout.write(secret)
+    sys.stdout.write("\n")
+    return 0
+
+
+def main() -> int:
+    callers = parent_processes()
+    prompt = prompt_text()
+    command = command_text(callers)
+    reason = reason_text()
+
+    if os.environ.get("ASKPASS_TERMINAL") == "1":
+        return run_tty(prompt, command, reason, callers)
+
+    if shutil.which("zenity"):
+        return run_zenity(prompt, command, reason, callers)
+
+    if shutil.which("kdialog"):
+        return run_kdialog(prompt, command, reason, callers)
+
+    return run_tty(prompt, command, reason, callers)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
